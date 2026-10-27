@@ -1,0 +1,100 @@
+# Backup and WAL-archiving alerts.
+#
+# Metric sources (every name below is checked against the live stack by
+# dr/verify-metrics.sh in CI, so a renamed metric fails the build):
+#   barman_cloud_cloudnative_pg_io_*  Barman Cloud plugin, via the CNPG instance exporter (:9187)
+#   cnpg_pg_stat_archiver_*           CNPG default monitoring queries (pg_stat_archiver)
+#   cnpg_pg_replication_in_recovery   CNPG default monitoring queries (1 on replicas)
+#   velero_backup_*                   Velero server (:8085)
+#
+# The `cluster` label is added by the PodMonitor relabeling in
+# monitoring/podmonitor.yaml (from the cnpg.io/cluster pod label).
+#
+# Thresholds follow the backup schedules in this repository:
+#   CNPG base backup:  daily (ScheduledBackup pg-daily)      -> too old after 26h
+#   WAL archiving:     archive_timeout = 15s                 -> stale after 5m
+#   Velero:            hourly (Schedule ledger-hourly)       -> too old after 3h
+groups:
+  - name: postgres-backups
+    rules:
+      - alert: PostgresBaseBackupTooOld
+        expr: |
+          time() - max by (namespace, cluster) (barman_cloud_cloudnative_pg_io_last_available_backup_timestamp > 0)
+            > 26 * 3600
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No successful base backup of {{ $labels.namespace }}/{{ $labels.cluster }} in over 26h"
+          description: "The newest base backup is {{ $value | humanizeDuration }} old. Recovery still works from the last backup plus WAL, but every hour adds WAL replay time to the RTO."
+          runbook_url: "https://github.com/ahmedelgmal310/k8s-disaster-recovery#base-backup-too-old-or-failed"
+
+      - alert: PostgresBaseBackupFailed
+        expr: |
+          max by (namespace, cluster) (barman_cloud_cloudnative_pg_io_last_failed_backup_timestamp)
+            > max by (namespace, cluster) (barman_cloud_cloudnative_pg_io_last_available_backup_timestamp)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The latest base backup of {{ $labels.namespace }}/{{ $labels.cluster }} failed"
+          description: "The most recent backup attempt failed after the last successful one. Check the Backup objects and the plugin sidecar logs."
+          runbook_url: "https://github.com/ahmedelgmal310/k8s-disaster-recovery#base-backup-too-old-or-failed"
+
+      - alert: PostgresNoBaseBackup
+        expr: |
+          max by (namespace, cluster) (barman_cloud_cloudnative_pg_io_last_available_backup_timestamp) == 0
+        for: 1h
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.cluster }} has no base backup"
+          description: "WAL is useless without a base backup to replay it onto: this cluster cannot be recovered. A recovered cluster archives to a new serverName and needs a fresh base backup straight away."
+          runbook_url: "https://github.com/ahmedelgmal310/k8s-disaster-recovery#base-backup-too-old-or-failed"
+
+  - name: postgres-wal-archiving
+    rules:
+      - alert: PostgresWALArchivingFailing
+        expr: increase(cnpg_pg_stat_archiver_failed_count[5m]) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "WAL archiving is failing on {{ $labels.namespace }}/{{ $labels.pod }}"
+          description: "archive_command failed {{ $value | printf \"%.0f\" }} times in 5m. Unarchived WAL is not recoverable after a disk or cluster loss, so the RPO grows every minute this fires. pg_wal also fills up."
+          runbook_url: "https://github.com/ahmedelgmal310/k8s-disaster-recovery#wal-archiving-failing"
+
+      - alert: PostgresWALArchiveStale
+        expr: |
+          cnpg_pg_stat_archiver_seconds_since_last_archival > 300
+            and on (namespace, pod) cnpg_pg_replication_in_recovery == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No WAL archived from primary {{ $labels.namespace }}/{{ $labels.pod }} for over 5m"
+          description: "Last WAL archived {{ $value | humanizeDuration }} ago although archive_timeout is 15s. archive_command may be hanging without reporting a failure."
+          runbook_url: "https://github.com/ahmedelgmal310/k8s-disaster-recovery#wal-archiving-failing"
+
+  - name: velero-backups
+    rules:
+      - alert: VeleroBackupTooOld
+        expr: time() - velero_backup_last_successful_timestamp{schedule!=""} > 3 * 3600
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Velero schedule {{ $labels.schedule }} has no successful backup in over 3h"
+          description: "Last successful backup was {{ $value | humanizeDuration }} ago. Cluster resources and file-system volume data restored after a namespace or cluster loss would be this stale."
+          runbook_url: "https://github.com/ahmedelgmal310/k8s-disaster-recovery#velero-backup-too-old-or-failed"
+
+      - alert: VeleroBackupFailed
+        expr: |
+          increase(velero_backup_failure_total{schedule!=""}[2h]) > 0
+            or increase(velero_backup_partial_failure_total{schedule!=""}[2h]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Velero schedule {{ $labels.schedule }} had a failed or partially failed backup"
+          description: "Run `velero backup describe --details` on the newest backup of the schedule. A partially failed backup can silently miss volumes."
+          runbook_url: "https://github.com/ahmedelgmal310/k8s-disaster-recovery#velero-backup-too-old-or-failed"

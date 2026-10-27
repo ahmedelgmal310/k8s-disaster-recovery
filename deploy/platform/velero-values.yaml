@@ -1,0 +1,73 @@
+# Velero (chart vmware-tanzu/velero 12.2.0). Pins are indexed in docs/versions.md.
+image:
+  repository: velero/velero
+  tag: v1.18.4
+  # The digest takes precedence over the tag.
+  digest: sha256:c89fb5b6d1fd6afd368e0f483e6f5555fd62851a1eada8ac5c72482e674ca17b
+
+# The chart's CRD upgrade job pulls an extra kubectl image; the CRDs ship in
+# the chart's crds/ directory, which Helm installs on first install.
+upgradeCRDs: false
+
+initContainers:
+  - name: velero-plugin-for-aws
+    image: velero/velero-plugin-for-aws:v1.14.4@sha256:c85a7fa803569e3128c33e4f5766f84ab156c8d171c9f1dd2715581d45ce98fa
+    imagePullPolicy: IfNotPresent
+    volumeMounts:
+      - mountPath: /target
+        name: plugins
+
+credentials:
+  useSecret: true
+  # Created by dr/platform.sh from the break-glass secrets (never committed).
+  existingSecret: velero-s3
+
+# File-system backup of pod volumes with Kopia. Kopia encrypts every blob
+# client-side (AES-256-GCM) with the repository password from the
+# velero-repo-credentials Secret, before it reaches the bucket.
+deployNodeAgent: true
+snapshotsEnabled: false
+
+configuration:
+  uploaderType: kopia
+  # Pick up backups written by another cluster quickly (drill 3).
+  backupSyncPeriod: 10s
+  defaultBackupTTL: 168h0m0s
+  defaultVolumesToFsBackup: false
+  backupStorageLocation:
+    - name: default
+      provider: aws
+      bucket: velero
+      default: true
+      credential:
+        name: velero-s3
+        key: cloud
+      config:
+        region: us-east-1
+        s3ForcePathStyle: "true"
+        s3Url: http://s3.storage.svc.cluster.local:8333
+        # SSE-S3 on every object Velero writes (resource tarballs, logs).
+        serverSideEncryption: AES256
+        # S3-compatible stores do not all accept the SDK's default CRC32
+        # trailing checksums.
+        checksumAlgorithm: ""
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+nodeAgent:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 1Gi
+
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: false

@@ -1,0 +1,219 @@
+# promtool test rules monitoring/tests/backup-alerts.test.yml
+rule_files:
+  - ../rules/backup-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # Base backup taken at t=1h, then the daily schedule stops working.
+  - name: base backup goes stale after 26h
+    interval: 1m
+    input_series:
+      - series: 'barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{namespace="ledger",cluster="pg",pod="pg-1"}'
+        values: "3600x1800"
+      - series: 'barman_cloud_cloudnative_pg_io_last_failed_backup_timestamp{namespace="ledger",cluster="pg",pod="pg-1"}'
+        values: "0x1800"
+    alert_rule_test:
+      - eval_time: 26h
+        alertname: PostgresBaseBackupTooOld
+        exp_alerts: []
+      # Age crosses 26h at t=27h; the alert fires once that held for 10m.
+      - eval_time: 27h5m
+        alertname: PostgresBaseBackupTooOld
+        exp_alerts: []
+      - eval_time: 27h30m
+        alertname: PostgresBaseBackupTooOld
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: ledger
+              cluster: pg
+            exp_annotations:
+              summary: "No successful base backup of ledger/pg in over 26h"
+              description: "The newest base backup is 1d 2h 30m 0s old. Recovery still works from the last backup plus WAL, but every hour adds WAL replay time to the RTO."
+              runbook_url: "https://github.com/ahmedelgmal310/k8s-disaster-recovery#base-backup-too-old-or-failed"
+      - eval_time: 27h30m
+        alertname: PostgresBaseBackupFailed
+        exp_alerts: []
+      - eval_time: 27h30m
+        alertname: PostgresNoBaseBackup
+        exp_alerts: []
+
+  # A fresh backup keeps everything quiet.
+  - name: daily backups do not alert
+    interval: 1m
+    input_series:
+      # A new backup lands every 24h: timestamps 1m, 24h, 48h.
+      - series: 'barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{namespace="ledger",cluster="pg",pod="pg-1"}'
+        values: "60x1439 86400x1439 172800x100"
+      - series: 'barman_cloud_cloudnative_pg_io_last_failed_backup_timestamp{namespace="ledger",cluster="pg",pod="pg-1"}'
+        values: "0x3000"
+    alert_rule_test:
+      - eval_time: 47h
+        alertname: PostgresBaseBackupTooOld
+        exp_alerts: []
+      - eval_time: 47h
+        alertname: PostgresBaseBackupFailed
+        exp_alerts: []
+
+  # A backup fails at t=2h15m; the last successful one was at t=1h.
+  - name: failed base backup
+    interval: 1m
+    input_series:
+      - series: 'barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{namespace="ledger",cluster="pg",pod="pg-1"}'
+        values: "3600x200"
+      - series: 'barman_cloud_cloudnative_pg_io_last_failed_backup_timestamp{namespace="ledger",cluster="pg",pod="pg-1"}'
+        values: "0x134 8100x65"
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: PostgresBaseBackupFailed
+        exp_alerts: []
+      - eval_time: 3h
+        alertname: PostgresBaseBackupFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: ledger
+              cluster: pg
+            exp_annotations:
+              summary: "The latest base backup of ledger/pg failed"
+              description: "The most recent backup attempt failed after the last successful one. Check the Backup objects and the plugin sidecar logs."
+              runbook_url: "https://github.com/ahmedelgmal310/k8s-disaster-recovery#base-backup-too-old-or-failed"
+
+  - name: cluster that never had a base backup
+    interval: 1m
+    input_series:
+      - series: 'barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{namespace="ledger",cluster="pg",pod="pg-1"}'
+        values: "0x120"
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: PostgresNoBaseBackup
+        exp_alerts: []
+      - eval_time: 1h30m
+        alertname: PostgresNoBaseBackup
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: ledger
+              cluster: pg
+            exp_annotations:
+              summary: "ledger/pg has no base backup"
+              description: "WAL is useless without a base backup to replay it onto: this cluster cannot be recovered. A recovered cluster archives to a new serverName and needs a fresh base backup straight away."
+              runbook_url: "https://github.com/ahmedelgmal310/k8s-disaster-recovery#base-backup-too-old-or-failed"
+      # "Too old" must not double-fire for a cluster with no backup at all.
+      - eval_time: 1h30m
+        alertname: PostgresBaseBackupTooOld
+        exp_alerts: []
+
+  # archive_command starts failing at t=5m, once per minute.
+  - name: WAL archiving failures
+    interval: 1m
+    input_series:
+      - series: 'cnpg_pg_stat_archiver_failed_count{namespace="ledger",pod="pg-1"}'
+        values: "0x4 1+1x20"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PostgresWALArchivingFailing
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: PostgresWALArchivingFailing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: ledger
+              pod: pg-1
+            exp_annotations:
+              summary: "WAL archiving is failing on ledger/pg-1"
+              description: "archive_command failed 5 times in 5m. Unarchived WAL is not recoverable after a disk or cluster loss, so the RPO grows every minute this fires. pg_wal also fills up."
+              runbook_url: "https://github.com/ahmedelgmal310/k8s-disaster-recovery#wal-archiving-failing"
+
+  - name: archiving recovers after a transient failure
+    interval: 1m
+    input_series:
+      # One failure at t=2m, then healthy.
+      - series: 'cnpg_pg_stat_archiver_failed_count{namespace="ledger",pod="pg-1"}'
+        values: "0 0 1x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: PostgresWALArchivingFailing
+        exp_alerts: []
+
+  # The primary stops archiving (no failures reported); the replica's counter
+  # also grows but replicas never archive, so only the primary alerts.
+  - name: stale WAL archive on the primary only
+    interval: 1m
+    input_series:
+      - series: 'cnpg_pg_stat_archiver_seconds_since_last_archival{namespace="ledger",pod="pg-1"}'
+        values: "10+60x20"
+      - series: 'cnpg_pg_replication_in_recovery{namespace="ledger",pod="pg-1"}'
+        values: "0x20"
+      - series: 'cnpg_pg_stat_archiver_seconds_since_last_archival{namespace="ledger",pod="pg-2"}'
+        values: "10+60x20"
+      - series: 'cnpg_pg_replication_in_recovery{namespace="ledger",pod="pg-2"}'
+        values: "1x20"
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: PostgresWALArchiveStale
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: PostgresWALArchiveStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: ledger
+              pod: pg-1
+            exp_annotations:
+              summary: "No WAL archived from primary ledger/pg-1 for over 5m"
+              description: "Last WAL archived 12m 10s ago although archive_timeout is 15s. archive_command may be hanging without reporting a failure."
+              runbook_url: "https://github.com/ahmedelgmal310/k8s-disaster-recovery#wal-archiving-failing"
+
+  # Hourly backups until t=3h, then the schedule stops producing backups.
+  - name: Velero schedule stops
+    interval: 1m
+    input_series:
+      # Each sample is "a backup just completed" until t=3h, then nothing new.
+      - series: 'velero_backup_last_successful_timestamp{schedule="ledger-hourly"}'
+        values: "0+60x180 10800x300"
+    alert_rule_test:
+      - eval_time: 5h
+        alertname: VeleroBackupTooOld
+        exp_alerts: []
+      - eval_time: 6h30m
+        alertname: VeleroBackupTooOld
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              schedule: ledger-hourly
+            exp_annotations:
+              summary: "Velero schedule ledger-hourly has no successful backup in over 3h"
+              description: "Last successful backup was 3h 30m 0s ago. Cluster resources and file-system volume data restored after a namespace or cluster loss would be this stale."
+              runbook_url: "https://github.com/ahmedelgmal310/k8s-disaster-recovery#velero-backup-too-old-or-failed"
+
+  - name: Velero backup failures
+    interval: 15m
+    input_series:
+      - series: 'velero_backup_failure_total{schedule="ledger-hourly"}'
+        values: "0x4 1x20"
+      - series: 'velero_backup_partial_failure_total{schedule="ledger-hourly"}'
+        values: "0x24"
+      # Backups created by hand (no schedule) are ignored.
+      - series: 'velero_backup_failure_total{schedule=""}'
+        values: "0x4 3x20"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: VeleroBackupFailed
+        exp_alerts: []
+      - eval_time: 2h
+        alertname: VeleroBackupFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              schedule: ledger-hourly
+            exp_annotations:
+              summary: "Velero schedule ledger-hourly had a failed or partially failed backup"
+              description: "Run `velero backup describe --details` on the newest backup of the schedule. A partially failed backup can silently miss volumes."
+              runbook_url: "https://github.com/ahmedelgmal310/k8s-disaster-recovery#velero-backup-too-old-or-failed"
+      # The failure ages out of the 2h window.
+      - eval_time: 4h
+        alertname: VeleroBackupFailed
+        exp_alerts: []

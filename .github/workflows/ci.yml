@@ -1,0 +1,192 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  GO_VERSION: "1.27.3"
+  GOLANGCI_LINT_VERSION: v2.15.0
+  GOVULNCHECK_VERSION: v1.9.0
+  KUBECONFORM_VERSION: v0.8.0
+  KUBECONFORM_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+  CRDS_CATALOG_REF: 3eb90d47aba8d61919d4419dd38301536e32a94b
+  PROMETHEUS_IMAGE: prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e
+  ACTIONLINT_IMAGE: rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+  HADOLINT_IMAGE: mirror.gcr.io/hadolint/hadolint:v2.15.1@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d
+  GITLEAKS_IMAGE: ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+  TRIVY_IMAGE: mirror.gcr.io/aquasec/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
+  COVERAGE_MIN: "80"
+
+jobs:
+  go:
+    name: Go vet, test (race + coverage, real PostgreSQL), govulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18.6-alpine3.23@sha256:1a0c23d53c1ad77468c8653fa6eed4f4105cfbef9e6f027bc1dfeb16949a8c29
+        env:
+          POSTGRES_USER: ledger
+          POSTGRES_DB: ledger
+          # Throwaway service container reachable only from this job.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ledger"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      DATABASE_URL: postgres://ledger@127.0.0.1:5432/ledger?sslmode=disable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: go vet
+        run: go vet ./...
+      - name: go test (race, coverage)
+        run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
+      - name: Coverage gate
+        run: |
+          total=$(go tool cover -func=coverage.out | awk '/^total:/ {sub("%", "", $3); print $3}')
+          echo "Total coverage: ${total}% (minimum ${COVERAGE_MIN}%)"
+          echo "Go test coverage: **${total}%** (gate ${COVERAGE_MIN}%)" >> "$GITHUB_STEP_SUMMARY"
+          awk -v t="$total" -v m="$COVERAGE_MIN" 'BEGIN { exit !(t + 0 >= m + 0) }'
+      - name: govulncheck
+        run: go run "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}" ./...
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage
+          path: coverage.out
+          retention-days: 7
+
+  golangci-lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+
+  static:
+    name: gitleaks, shellcheck, actionlint, hadolint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: gitleaks (full history)
+        run: |
+          docker run --rm -v "$PWD:/repo:ro" \
+            -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
+            "$GITLEAKS_IMAGE" git --no-banner --redact --verbose /repo
+      - name: shellcheck
+        run: shellcheck --version && shellcheck -x dr/*.sh
+      - name: actionlint
+        run: docker run --rm -v "$PWD:/repo:ro" -w /repo "$ACTIONLINT_IMAGE" -color
+      - name: hadolint
+        run: docker run --rm -v "$PWD:/work:ro" -w /work "$HADOLINT_IMAGE" hadolint Dockerfile
+
+  manifests:
+    name: kubeconform, promtool (rules + unit tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install kubeconform
+        run: |
+          curl -fsSLo /tmp/kubeconform.tgz \
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_SHA256}  /tmp/kubeconform.tgz" | sha256sum -c -
+          tar -xzf /tmp/kubeconform.tgz -C /usr/local/bin kubeconform
+      - name: Render templates
+        run: |
+          mkdir -p rendered
+          export PG_IMAGE=ghcr.io/cloudnative-pg/postgresql:18 SERVER_NAME=pg-g2 SOURCE_SERVER=pg-g1 \
+            TARGET_TIME="2026-01-01 00:00:00.000000+00" APP_IMAGE=ledger-api:ci S3_IP=172.18.0.10
+          for f in deploy/ledger/*.yaml deploy/platform/s3-endpoint.yaml deploy/platform/velero-schedule.yaml; do
+            envsubst < "$f" > "rendered/$(basename "$(dirname "$f")")-$(basename "$f")"
+          done
+          envsubst < deploy/platform/restore-modifiers.yaml > rendered/restore-modifiers.yaml
+          # The modifier payload itself must be valid YAML with valid JSON patches.
+          yq '.data["modifiers.yaml"]' rendered/restore-modifiers.yaml > rendered/modifiers.inner
+          yq -o=json '.resourceModifierRules[0].mergePatches[0].patchData' rendered/modifiers.inner | jq -r . | jq -e .spec.bootstrap.recovery > /dev/null
+      - name: kubeconform (core schemas strict, CRDs from the CRDs-catalog)
+        run: |
+          kubeconform -strict -summary -output pretty -ignore-missing-schemas \
+            -schema-location default \
+            -schema-location "https://raw.githubusercontent.com/datreeio/CRDs-catalog/${CRDS_CATALOG_REF}/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" \
+            rendered/ monitoring/podmonitor.yaml
+      - name: promtool check rules
+        run: |
+          docker run --rm -v "$PWD/monitoring:/m:ro" --entrypoint promtool "$PROMETHEUS_IMAGE" \
+            check rules /m/rules/backup-alerts.yml
+      - name: promtool test rules (alert unit tests)
+        run: |
+          docker run --rm -v "$PWD/monitoring:/m:ro" -w /m/tests --entrypoint promtool "$PROMETHEUS_IMAGE" \
+            test rules backup-alerts.test.yml
+
+  image:
+    name: Image build, Trivy gate, SBOM
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
+      - name: Build image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          load: true
+          push: false
+          tags: ledger-api:ci
+          cache-from: type=gha,scope=ledger-api
+          cache-to: type=gha,scope=ledger-api,mode=max
+      - name: Export image
+        run: mkdir -p /tmp/img && docker save ledger-api:ci -o /tmp/img/ledger-api.tar
+      - name: Trivy vulnerability gate (HIGH/CRITICAL)
+        run: |
+          docker run --rm -v /tmp/img:/img "$TRIVY_IMAGE" image --input /img/ledger-api.tar \
+            --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --no-progress
+      - name: SBOM (CycloneDX)
+        run: |
+          docker run --rm -v /tmp/img:/img "$TRIVY_IMAGE" image --input /img/ledger-api.tar \
+            --format cyclonedx --output /img/sbom.cdx.json --no-progress
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom
+          path: /tmp/img/sbom.cdx.json
+          retention-days: 30

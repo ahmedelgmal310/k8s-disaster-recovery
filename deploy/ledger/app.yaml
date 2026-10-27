@@ -1,0 +1,141 @@
+# The ledger API: writes one timestamped row every 100 ms and keeps CSV
+# exports on a PersistentVolume that Velero backs up with Kopia (file-system
+# backup, opted in through the backup.velero.io/backup-volumes annotation).
+# Rendered with envsubst: APP_IMAGE.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ledger-api
+  namespace: ledger
+  labels:
+    app.kubernetes.io/name: ledger-api
+    app.kubernetes.io/part-of: ledger
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ledger-data
+  namespace: ledger
+  labels:
+    app.kubernetes.io/name: ledger-api
+    app.kubernetes.io/part-of: ledger
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ledger-api
+  namespace: ledger
+  labels:
+    app.kubernetes.io/name: ledger-api
+    app.kubernetes.io/part-of: ledger
+spec:
+  replicas: 1
+  # One writer on a ReadWriteOnce volume: never run old and new pod together.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ledger-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ledger-api
+        app.kubernetes.io/part-of: ledger
+      annotations:
+        backup.velero.io/backup-volumes: data
+    spec:
+      serviceAccountName: ledger-api
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: ${APP_IMAGE}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: PGHOST
+              value: pg-rw
+            - name: PGPORT
+              value: "5432"
+            - name: PGDATABASE
+              value: app
+            - name: PGSSLMODE
+              value: require
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: ledger-db-credentials
+                  key: username
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ledger-db-credentials
+                  key: password
+            - name: WRITER_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: WRITE_INTERVAL
+              value: 100ms
+            - name: DATA_DIR
+              value: /data
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 2
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: ledger-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ledger-api
+  namespace: ledger
+  labels:
+    app.kubernetes.io/name: ledger-api
+    app.kubernetes.io/part-of: ledger
+spec:
+  selector:
+    app.kubernetes.io/name: ledger-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

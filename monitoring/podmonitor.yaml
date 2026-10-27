@@ -1,0 +1,30 @@
+# Scrapes every CNPG instance (PostgreSQL exporter + Barman Cloud plugin
+# metrics on :9187) for the Prometheus Operator. The relabeling adds the
+# `cluster` label that monitoring/rules/backup-alerts.yml aggregates by.
+# Velero's metrics service is scraped through the chart's ServiceMonitor
+# (metrics.serviceMonitor.enabled=true where the Prometheus Operator runs).
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: cnpg-instances
+  namespace: ledger
+  labels:
+    app.kubernetes.io/part-of: ledger
+spec:
+  selector:
+    matchExpressions:
+      - key: cnpg.io/cluster
+        operator: Exists
+      - key: cnpg.io/podRole
+        operator: In
+        values: ["instance"]
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 30s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_label_cnpg_io_cluster]
+          targetLabel: cluster
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod

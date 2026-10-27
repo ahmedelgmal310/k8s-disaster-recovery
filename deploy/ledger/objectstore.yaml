@@ -1,0 +1,52 @@
+# Where CNPG keeps base backups and the continuous WAL archive.
+# Credentials live in the pg-backup-s3 Secret (created by dr/deploy-app.sh,
+# never committed). The S3 identity can only touch the pg-backups bucket.
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  name: backup-store
+  namespace: ledger
+  labels:
+    app.kubernetes.io/part-of: ledger
+spec:
+  # Recovery window: any point in the last 7 days stays restorable. Older base
+  # backups and the WAL only they need are deleted after the next backup.
+  retentionPolicy: "7d"
+  configuration:
+    destinationPath: s3://pg-backups/
+    endpointURL: http://s3.storage.svc.cluster.local:8333
+    s3Credentials:
+      accessKeyId:
+        name: pg-backup-s3
+        key: ACCESS_KEY_ID
+      secretAccessKey:
+        name: pg-backup-s3
+        key: ACCESS_SECRET_KEY
+      region:
+        name: pg-backup-s3
+        key: REGION
+    wal:
+      compression: gzip
+      # Server-side encryption (SSE-S3, AES-256) on every WAL segment.
+      encryption: AES256
+      maxParallel: 4
+    data:
+      compression: gzip
+      encryption: AES256
+      immediateCheckpoint: true
+      jobs: 2
+  instanceSidecarConfiguration:
+    retentionPolicyIntervalSeconds: 1800
+    env:
+      # Newer boto3 sends CRC checksums by default; only send them when the
+      # API requires it, as recommended for S3-compatible stores.
+      - name: AWS_REQUEST_CHECKSUM_CALCULATION
+        value: when_required
+      - name: AWS_RESPONSE_CHECKSUM_VALIDATION
+        value: when_required
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        memory: 512Mi

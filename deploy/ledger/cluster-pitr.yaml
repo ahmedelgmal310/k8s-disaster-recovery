@@ -1,0 +1,52 @@
+# PostgreSQL cluster recovered to a point in time (drill 2, runbook "bad data").
+# Rendered with envsubst: PG_IMAGE, SOURCE_SERVER, SERVER_NAME, TARGET_TIME.
+#
+# The newest base backup taken before TARGET_TIME is restored, then the WAL
+# archive of SOURCE_SERVER is replayed up to TARGET_TIME. Transactions that
+# committed after it (the bad DELETE) are not applied.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: pg
+  namespace: ledger
+  labels:
+    app.kubernetes.io/part-of: ledger
+    app.kubernetes.io/component: database
+spec:
+  instances: 1
+  imageName: ${PG_IMAGE}
+  enableSuperuserAccess: false
+  primaryUpdateStrategy: unsupervised
+  storage:
+    size: 2Gi
+  postgresql:
+    parameters:
+      archive_timeout: "15s"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+  bootstrap:
+    recovery:
+      source: origin
+      database: app
+      owner: app
+      secret:
+        name: ledger-db-credentials
+      recoveryTarget:
+        targetTime: "${TARGET_TIME}"
+  externalClusters:
+    - name: origin
+      plugin:
+        name: barman-cloud.cloudnative-pg.io
+        parameters:
+          barmanObjectName: backup-store
+          serverName: ${SOURCE_SERVER}
+  plugins:
+    - name: barman-cloud.cloudnative-pg.io
+      isWALArchiver: true
+      parameters:
+        barmanObjectName: backup-store
+        serverName: ${SERVER_NAME}

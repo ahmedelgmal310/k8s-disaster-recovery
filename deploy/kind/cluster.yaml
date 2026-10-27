@@ -1,0 +1,6 @@
+# Single-node kind cluster. Both the primary and the standby cluster in the
+# drills use this file; the node image is pinned by digest in the workflow.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane

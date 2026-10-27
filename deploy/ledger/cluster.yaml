@@ -1,0 +1,44 @@
+# PostgreSQL cluster, first bootstrap (empty database).
+# Rendered with envsubst: PG_IMAGE, SERVER_NAME.
+#
+# SERVER_NAME is the folder in the object store this cluster archives to.
+# Every recovery starts a new timeline and archives to a new SERVER_NAME, so a
+# restored cluster can never overwrite the WAL history it was restored from.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: pg
+  namespace: ledger
+  labels:
+    app.kubernetes.io/part-of: ledger
+    app.kubernetes.io/component: database
+spec:
+  instances: 1
+  imageName: ${PG_IMAGE}
+  enableSuperuserAccess: false
+  primaryUpdateStrategy: unsupervised
+  storage:
+    size: 2Gi
+  postgresql:
+    parameters:
+      # Upper bound on the RPO after an abrupt loss: a partially filled WAL
+      # segment is switched and archived at least every 15 seconds.
+      archive_timeout: "15s"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+  bootstrap:
+    initdb:
+      database: app
+      owner: app
+      secret:
+        name: ledger-db-credentials
+  plugins:
+    - name: barman-cloud.cloudnative-pg.io
+      isWALArchiver: true
+      parameters:
+        barmanObjectName: backup-store
+        serverName: ${SERVER_NAME}

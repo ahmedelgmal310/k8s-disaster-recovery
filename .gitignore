@@ -1,0 +1,22 @@
+# build and test output
+/bin/
+/dist/
+coverage.out
+*.test
+rendered/
+
+# drill output (uploaded as a CI artifact instead)
+dr-results/
+
+# secrets must never be written inside the repository
+*.env
+dr-secrets/
+
+# editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# local tooling state
+.omc/
+.impeccable/

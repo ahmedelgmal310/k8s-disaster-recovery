@@ -1,0 +1,25 @@
+# Hourly backup of the ledger namespace, kept for 7 days.
+#
+# Only objects labelled app.kubernetes.io/part-of=ledger are included: the
+# app, its PVC (volume data through Kopia), Secrets, NetworkPolicies and the
+# CNPG Cluster/ObjectStore/ScheduledBackup definitions. Objects the operator
+# creates (instance pods, PGDATA PVCs, certificates, services) are left out
+# on purpose: PostgreSQL is restored from its own base backup + WAL, which is
+# transaction-consistent, instead of from a crash-consistent copy of PGDATA.
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: ledger-hourly
+  namespace: velero
+spec:
+  schedule: "0 * * * *"
+  useOwnerReferencesInBackup: false
+  template:
+    includedNamespaces: ["ledger"]
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/part-of: ledger
+    snapshotVolumes: false
+    defaultVolumesToFsBackup: false
+    storageLocation: default
+    ttl: 168h0m0s

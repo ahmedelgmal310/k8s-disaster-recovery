@@ -1,0 +1,51 @@
+# Velero restore resource modifier: rewrites the restored CNPG Cluster so it
+# bootstraps from the object store (latest base backup + all archived WAL)
+# instead of running initdb on an empty volume.
+# Rendered with envsubst: SOURCE_SERVER, SERVER_NAME.
+#
+# JSON merge patch semantics: null deletes a key, arrays are replaced whole.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ledger-restore-modifiers
+  namespace: velero
+data:
+  modifiers.yaml: |
+    version: v1
+    resourceModifierRules:
+      - conditions:
+          groupResource: clusters.postgresql.cnpg.io
+          resourceNameRegex: "^pg$"
+          namespaces: ["ledger"]
+        mergePatches:
+          - patchData: |
+              {
+                "spec": {
+                  "bootstrap": {
+                    "initdb": null,
+                    "recovery": {
+                      "source": "origin",
+                      "database": "app",
+                      "owner": "app",
+                      "secret": {"name": "ledger-db-credentials"},
+                      "recoveryTarget": null
+                    }
+                  },
+                  "externalClusters": [
+                    {
+                      "name": "origin",
+                      "plugin": {
+                        "name": "barman-cloud.cloudnative-pg.io",
+                        "parameters": {"barmanObjectName": "backup-store", "serverName": "${SOURCE_SERVER}"}
+                      }
+                    }
+                  ],
+                  "plugins": [
+                    {
+                      "name": "barman-cloud.cloudnative-pg.io",
+                      "isWALArchiver": true,
+                      "parameters": {"barmanObjectName": "backup-store", "serverName": "${SERVER_NAME}"}
+                    }
+                  ]
+                }
+              }
