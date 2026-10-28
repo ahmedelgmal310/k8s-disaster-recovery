@@ -43,8 +43,12 @@ die() {
   log "FAIL: $*"
   exit 1
 }
-group() { [[ -n "${GITHUB_ACTIONS:-}" ]] && echo "::group::$*" || log "== $*"; }
-endgroup() { [[ -n "${GITHUB_ACTIONS:-}" ]] && echo "::endgroup::" || true; }
+group() {
+  if [[ -n "${GITHUB_ACTIONS:-}" ]]; then echo "::group::$*"; else log "== $*"; fi
+}
+endgroup() {
+  if [[ -n "${GITHUB_ACTIONS:-}" ]]; then echo "::endgroup::"; fi
+}
 
 # Epoch seconds with millisecond precision.
 now() { date -u +%s.%3N; }

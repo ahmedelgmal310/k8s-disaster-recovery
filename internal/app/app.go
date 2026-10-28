@@ -58,7 +58,7 @@ func (a *App) Writer() *writer.Writer { return a.writer }
 func (a *App) Run(ctx context.Context) error {
 	defer a.db.Close()
 
-	ln, err := net.Listen("tcp", a.cfg.ListenAddr)
+	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", a.cfg.ListenAddr)
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}

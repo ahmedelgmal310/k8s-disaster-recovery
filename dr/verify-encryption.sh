@@ -60,7 +60,7 @@ servers=$(awk '{ split($1, p, "/"); print p[1] }' "$work/pg-backups.txt" | sort 
 inventory="[]"
 for srv in $servers; do
   wal=$(grep -c "^${srv}/wals/" "$work/pg-backups.txt" || true)
-  base=$(grep -E "^${srv}/base/[^/]+/backup.info" "$work/pg-backups.txt" | wc -l)
+  base=$(grep -cE "^${srv}/base/[^/]+/backup.info" "$work/pg-backups.txt" || true)
   log "serverName $srv: $base base backup(s), $wal WAL objects"
   inventory=$(jq --arg s "$srv" --argjson b "$base" --argjson w "$wal" '. + [{server: $s, base_backups: $b, wal_objects: $w}]' <<<"$inventory")
 done

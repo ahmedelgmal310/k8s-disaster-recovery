@@ -51,6 +51,7 @@ checksum and its images are used by tag.
 | Go toolchain | 1.27.3 |
 | github.com/jackc/pgx/v5 | v5.11.0 (2026-09-07) |
 | github.com/prometheus/client_golang | v1.24.1 (2026-07-24) |
+| golang.org/x/text (indirect, raised for GO-2026-6629 / CVE-2026-56851) | v0.41.0 (2026-08-11) |
 
 ## CI (`.github/workflows/ci.yml`, `.github/workflows/dr-drills.yml`)
 

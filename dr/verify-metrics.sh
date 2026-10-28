@@ -29,7 +29,9 @@ scrape() { # KIND/NAME NAMESPACE REMOTE_PORT FILE
 velero_backup "metrics-$(date -u +%H%M%S)"
 
 scrape "pod/$(primary_pod)" "$NS" 9187 "$out/cnpg.prom" || die "cannot scrape the PostgreSQL instance exporter"
-scrape deploy/velero velero 8085 "$out/velero.prom" || die "cannot scrape Velero"
+# Not deploy/velero: the chart's Deployment selector also matches node-agent pods.
+velero_pod=$(kubectl -n velero get pod -l name=velero -o name | head -1)
+scrape "$velero_pod" velero 8085 "$out/velero.prom" || die "cannot scrape Velero"
 
 mapfile -t names < <(sed 's/#.*//' "$ROOT"/monitoring/rules/*.yml | grep -oE '\b(cnpg|barman|velero)_[a-z0-9_]*[a-z0-9]' | sort -u)
 ((${#names[@]} > 0)) || die "no metric names found in the rules"
