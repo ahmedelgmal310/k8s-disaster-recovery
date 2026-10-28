@@ -187,7 +187,14 @@ velero_backup() { # NAME
     velero backup logs "$1" | tail -50 || true
     die "Velero backup $1 ended in phase $phase"
   fi
-  log "Velero backup $1 completed ($(kubectl get backups.velero.io "$1" -n velero -o jsonpath='{.status.progress.itemsBackedUp}') items)"
+  # The volume data must be in the backup, not only the PVC object.
+  local pvb
+  pvb=$(kubectl get podvolumebackups.velero.io -n velero -l "velero.io/backup-name=$1"     -o jsonpath='{range .items[?(@.status.phase=="Completed")]}{.spec.volume}{" "}{end}')
+  if [[ -z "$pvb" ]]; then
+    velero backup describe "$1" --details || true
+    die "Velero backup $1 contains no completed file-system volume backup"
+  fi
+  log "Velero backup $1 completed ($(kubectl get backups.velero.io "$1" -n velero -o jsonpath='{.status.progress.itemsBackedUp}') items, volumes: ${pvb% })"
 }
 
 # Velero restore with the CNPG recovery modifier.
@@ -204,7 +211,14 @@ velero_restore() { # BACKUP SOURCE_SERVER NEW_SERVER RESTORE_NAME
     velero restore logs "$4" | tail -80 || true
     die "Velero restore $4 ended in phase $phase"
   fi
-  log "Velero restore $4 completed ($(kubectl get restores.velero.io "$4" -n velero -o jsonpath='{.status.progress.itemsRestored}') items, $(kubectl get restores.velero.io "$4" -n velero -o jsonpath='{.status.warnings}') warnings)"
+  local pvr
+  pvr=$(kubectl get podvolumerestores.velero.io -n velero -l "velero.io/restore-name=$4"     -o jsonpath='{range .items[?(@.status.phase=="Completed")]}{.spec.volume}{" "}{end}')
+  [[ -n "$pvr" ]] || {
+    velero restore describe "$4" --details || true
+    die "Velero restore $4 restored no volume data"
+  }
+  log "Velero restore $4 completed ($(kubectl get restores.velero.io "$4" -n velero -o jsonpath='{.status.progress.itemsRestored}') items, $(kubectl get restores.velero.io "$4" -n velero -o jsonpath='{.status.warnings}') warnings, volumes: ${pvr% })"
+  velero restore describe "$4" --details >"$RESULTS_DIR/$4.txt" 2>&1 || true
 }
 
 wal_archived() { # SEGMENT

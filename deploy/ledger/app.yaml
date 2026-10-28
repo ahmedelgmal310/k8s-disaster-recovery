@@ -20,6 +20,11 @@ metadata:
   labels:
     app.kubernetes.io/name: ledger-api
     app.kubernetes.io/part-of: ledger
+  annotations:
+    # kind's local-path provisioner creates hostPath PVs by default, and
+    # Velero's file-system backup skips hostPath volumes. A `local` PV is
+    # backed up like any other block or file volume.
+    volumeType: local
 spec:
   accessModes: ["ReadWriteOnce"]
   resources:
