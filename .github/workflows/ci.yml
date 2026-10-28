@@ -132,7 +132,8 @@ jobs:
           export PG_IMAGE=ghcr.io/cloudnative-pg/postgresql:18 SERVER_NAME=pg-g2 SOURCE_SERVER=pg-g1 \
             TARGET_TIME="2026-01-01 00:00:00.000000+00" APP_IMAGE=ledger-api:ci S3_IP=172.18.0.10
           for f in deploy/ledger/*.yaml deploy/platform/s3-endpoint.yaml deploy/platform/velero-schedule.yaml; do
-            envsubst < "$f" > "rendered/$(basename "$(dirname "$f")")-$(basename "$f")"
+            out="rendered/$(basename "$(dirname "$f")")-$(basename "$f")"
+            envsubst < "$f" > "$out"
           done
           envsubst < deploy/platform/restore-modifiers.yaml > rendered/restore-modifiers.yaml
           # The modifier payload itself must be valid YAML with valid JSON patches.

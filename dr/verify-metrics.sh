@@ -52,7 +52,8 @@ if ((missing > 0)); then
 fi
 
 last_backup=$(awk '/^barman_cloud_cloudnative_pg_io_last_available_backup_timestamp/ { print $2 }' "$out/cnpg.prom" | sort -g | tail -1)
-age=$(awk -v t="$last_backup" -v n="$(date +%s)" 'BEGIN { printf "%.0f", n - t }')
+# The exporter prints floats such as 1.79314564e+09; bash printf parses them.
+age=$(($(date +%s) - $(printf '%.0f' "$last_backup")))
 le "$age" 3600 || die "barman last_available_backup_timestamp is ${age}s old"
 log "all ${#names[@]} metrics used by alerts are live; last base backup ${age}s ago"
 
