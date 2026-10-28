@@ -195,6 +195,7 @@ velero_backup() { # NAME
     die "Velero backup $1 contains no completed file-system volume backup"
   fi
   log "Velero backup $1 completed ($(kubectl get backups.velero.io "$1" -n velero -o jsonpath='{.status.progress.itemsBackedUp}') items, volumes: ${pvb% })"
+  velero backup describe "$1" --details >"$RESULTS_DIR/backup-$1.txt" 2>&1 || true
 }
 
 # Velero restore with the CNPG recovery modifier.
@@ -219,6 +220,7 @@ velero_restore() { # BACKUP SOURCE_SERVER NEW_SERVER RESTORE_NAME
   }
   log "Velero restore $4 completed ($(kubectl get restores.velero.io "$4" -n velero -o jsonpath='{.status.progress.itemsRestored}') items, $(kubectl get restores.velero.io "$4" -n velero -o jsonpath='{.status.warnings}') warnings, volumes: ${pvr% })"
   velero restore describe "$4" --details >"$RESULTS_DIR/$4.txt" 2>&1 || true
+  sed -n '/^Warnings:/,/^Errors:/p' "$RESULTS_DIR/$4.txt" >&2 || true
 }
 
 wal_archived() { # SEGMENT

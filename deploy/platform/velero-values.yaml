@@ -46,6 +46,10 @@ configuration:
         region: us-east-1
         s3ForcePathStyle: "true"
         s3Url: http://s3.storage.svc.cluster.local:8333
+        # Address the velero CLI uses for presigned downloads (backup logs,
+        # restore warnings). In CI the CLI runs on the runner, which reaches
+        # the object store through its published port.
+        publicUrl: http://127.0.0.1:8333
         # SSE-S3 on every object Velero writes (resource tarballs, logs).
         serverSideEncryption: AES256
         # S3-compatible stores do not all accept the SDK's default CRC32
